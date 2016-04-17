@@ -10,6 +10,7 @@ public class DesktopLauncher {
 		LwjglApplicationConfiguration config = new LwjglApplicationConfiguration();
 		Graphics.DisplayMode displayMode = LwjglApplicationConfiguration.getDesktopDisplayMode();
 		config.setFromDisplayMode(displayMode);
+		config.vSyncEnabled=true;
 		new LwjglApplication(new GravSwarm(), config);
 	}
 }
