@@ -2,6 +2,9 @@ package com.mygdx.gravswarm;
 
 import com.badlogic.gdx.ApplicationAdapter;
 import com.badlogic.gdx.Gdx;
+import com.badlogic.gdx.Input;
+import com.badlogic.gdx.InputAdapter;
+import com.badlogic.gdx.InputProcessor;
 import com.badlogic.gdx.graphics.Color;
 import com.badlogic.gdx.graphics.GL20;
 import com.badlogic.gdx.graphics.PerspectiveCamera;
@@ -19,32 +22,63 @@ import com.badlogic.gdx.graphics.g3d.environment.PointLight;
 import com.badlogic.gdx.graphics.g3d.utils.CameraInputController;
 import com.badlogic.gdx.graphics.g3d.utils.ModelBuilder;
 import com.badlogic.gdx.math.Vector3;
+import com.badlogic.gdx.utils.Pool;
 
 import java.util.Random;
 import java.util.Vector;
+import java.util.concurrent.BrokenBarrierException;
+import java.util.concurrent.CyclicBarrier;
 
 public class GravSwarm extends ApplicationAdapter {
-	PerspectiveCamera cam;
+	boolean speedCheck;
+
 	Vector<Moon> moons;
+	Pool<Gravity> freeGravities;
 	Vector<Gravity>gravities;
 	Vector<GravityHandler>gravityHandlers;
+	Vector<Gravity>gravitiesToBeCulled;
+
+	PerspectiveCamera cam;
 	Model modelTemplate;
 	ModelBatch modelBatch;
 	Environment environment;
 	CameraInputController camController;
+	CoreInputProcessor coreInput;
+	CyclicBarrier barrier;
+
+	float LIGHT_INTENSITIY;
+	float GRAVITY_PLANE_DISTANCE;
+	int MOONS_TO_SPAWN;
+	int THREAD_COUNT;
 	
 	@Override
 	public void create () {
+		speedCheck=false;
 		Random rnd=new Random();
 		moons=new Vector<Moon>();
 		gravities=new Vector<Gravity>();
+		gravitiesToBeCulled=new Vector<Gravity>();
 		gravityHandlers=new Vector<GravityHandler>();
+		freeGravities=new Pool<Gravity>() {
+			@Override
+			protected Gravity newObject() {
+				return new Gravity(1f);
+			}
+		};
+
+		LIGHT_INTENSITIY=50000f;
+		GRAVITY_PLANE_DISTANCE=.7f;
+		MOONS_TO_SPAWN=1000;
+		THREAD_COUNT=3;
 
 		environment = new Environment();
 		environment.set(new ColorAttribute(ColorAttribute.AmbientLight, 0.4f, 0.4f, 0.4f, 1f));
-		environment.add(new PointLight().set(1f, 1f, 1f, 0f, 0f, 0f, 10000f));
+
+		coreInput=new CoreInputProcessor();
+		Gdx.input.setInputProcessor(coreInput);
 
 		modelBatch = new ModelBatch();
+		barrier= new CyclicBarrier(THREAD_COUNT+1);
 
 		cam = new PerspectiveCamera(67, Gdx.graphics.getWidth(), Gdx.graphics.getHeight());
 		cam.position.set(500f, 500f, 500f);
@@ -55,22 +89,29 @@ public class GravSwarm extends ApplicationAdapter {
 
 
 		ModelBuilder modelBuilder = new ModelBuilder();
-		modelTemplate=modelBuilder.createSphere(5f, 5f, 5f, 8, 5, new Material(ColorAttribute.createDiffuse(rnd.nextFloat(),rnd.nextFloat(),rnd.nextFloat(),0)), VertexAttributes.Usage.Position | VertexAttributes.Usage.Normal);
-		for(int x=0;x<500;++x)
+		for(int x=0;x<MOONS_TO_SPAWN;++x)
 		{
 			modelTemplate=modelBuilder.createSphere(5f, 5f, 5f, 8, 5, new Material(ColorAttribute.createDiffuse(rnd.nextFloat(),rnd.nextFloat(),rnd.nextFloat(),0)), VertexAttributes.Usage.Position | VertexAttributes.Usage.Normal);
 			moons.add(new Moon(modelTemplate));
-			moons.elementAt(x).transform.translate((rnd.nextFloat() * 100)-50, (rnd.nextFloat() * 100)-50, (rnd.nextFloat() * 100)-50);
-			moons.elementAt(x).updateVelocity(new Vector3((rnd.nextFloat()*20)-10,(rnd.nextFloat()*20)-10,(rnd.nextFloat()*20)-10));
-
+			moons.elementAt(x).transform.translate((rnd.nextFloat() * 200) - 100, (rnd.nextFloat() * 200) - 100, (rnd.nextFloat() * 200) - 100);
+		}
+		int curr=0;
+		int step=MOONS_TO_SPAWN/THREAD_COUNT;
+		int next=step;
+		for(int x=0;x<THREAD_COUNT;++x)
+		{
+			if(x<THREAD_COUNT-1)
+			{
+				gravityHandlers.add(new GravityHandler(curr, next));
+				curr=next;
+				next+=step+1;
+			}
+			else
+				gravityHandlers.add(new GravityHandler(curr,-1));
+			gravityHandlers.elementAt(x).start();
 		}
 
-		gravities.add(new Gravity(.1f));
-//		gravityHandlers.add(new GravityHandler(gravities, moons));
-//		gravityHandlers.elementAt(0).start();
 
-		camController = new CameraInputController(cam);
-		Gdx.input.setInputProcessor(camController);
 	}
 
 	@Override
@@ -78,25 +119,41 @@ public class GravSwarm extends ApplicationAdapter {
 		Gdx.gl.glViewport(0, 0, Gdx.graphics.getWidth(), Gdx.graphics.getHeight());
 		Gdx.gl.glClear(GL20.GL_COLOR_BUFFER_BIT | GL20.GL_DEPTH_BUFFER_BIT);
 
-//		for(int x=0;x<gravityHandlers.size();++x)
-//		{
-//			gravityHandlers.elementAt(x).notify();
-//		}
-		singleCoreGravity();
-
+		if(speedCheck)
+		{
+			for(int i=0;i<moons.size();++i)
+				moons.elementAt(i).scaleVelocity(.7f);
+		}
+		try {
+			barrier.await();//sync with the gravity threads before rendering
+		} catch (InterruptedException e) {
+			e.printStackTrace();
+		} catch (BrokenBarrierException e) {
+			e.printStackTrace();
+		}
+		//singleCoreGravity();
+		for(int moonNumber=0;moonNumber<moons.size();++moonNumber)
+			moons.elementAt(moonNumber).move();
 		modelBatch.begin(cam);
 		modelBatch.render(moons, environment);
 		modelBatch.end();
-//		try {
-//			gravityHandlers.elementAt(0).wait();
-//		} catch (InterruptedException e) {
-//			e.printStackTrace();
-//		}
+		while(gravitiesToBeCulled.size()>0)
+		{
+			freeGravities.free(gravitiesToBeCulled.elementAt(0));
+			gravities.remove(gravitiesToBeCulled.elementAt(0));
+			gravitiesToBeCulled.remove(0);
+		}
+		try {
+			barrier.await();//restart gravity calculations
+		} catch (InterruptedException e) {
+			e.printStackTrace();
+		} catch (BrokenBarrierException e) {
+			e.printStackTrace();
+		}
 	}
 
 	void singleCoreGravity()
 	{
-		Vector3 testVec=new Vector3(-.01f,-.01f,-.01f);
 		Vector3 position=new Vector3();
 		int x=0;
 		int y;
@@ -117,6 +174,68 @@ public class GravSwarm extends ApplicationAdapter {
 		//model.dispose();
 	}
 
+	class CoreInputProcessor extends InputAdapter
+	{
+		Gravity[] touchGravities;
+		Vector3 worldPoint;
+
+		CoreInputProcessor()
+		{
+			touchGravities=new Gravity[10];
+			worldPoint=new Vector3();
+		}
+		@Override public boolean touchDown(int x, int y, int pointer, int button)
+		{
+			if(button== Input.Buttons.LEFT)
+			{
+				worldPoint=cam.unproject(new Vector3(x, y, 1f));
+				worldPoint.lerp(cam.unproject(new Vector3(x, y, 0f)),GRAVITY_PLANE_DISTANCE);
+				touchGravities[pointer] = freeGravities.obtain();
+				touchGravities[pointer].spawn(worldPoint);
+				gravities.add(touchGravities[pointer]);
+				return true;
+			}
+			return false;
+		}
+		@Override public boolean touchDragged(int x,int y,int pointer)
+		{
+			if(touchGravities[pointer]!=null)
+			{
+				worldPoint=cam.unproject(new Vector3(x, y, 1f));
+				worldPoint.lerp(cam.unproject(new Vector3(x, y, 0f)),GRAVITY_PLANE_DISTANCE);
+				touchGravities[pointer].setPosition(worldPoint);
+				return true;
+			}
+			return false;
+		}
+		@Override public boolean touchUp(int x, int y, int pointer, int button)
+		{
+			if(button!= Input.Buttons.LEFT) return false;
+			gravitiesToBeCulled.add(touchGravities[pointer]);
+			touchGravities[pointer]=null;
+			return true;
+		}
+		@Override public boolean keyDown(int keycode)
+		{
+			if(keycode==Input.Keys.SPACE)
+			{
+				speedCheck=true;
+				return true;
+			}
+			return false;
+		}
+		@Override public boolean keyUp(int keycode)
+		{
+			if(keycode==Input.Keys.SPACE)
+			{
+				speedCheck=false;
+				return true;
+			}
+			return false;
+		}
+	}
+
+
 	class Moon extends ModelInstance
 	{
 		Vector3 velocity;
@@ -133,13 +252,15 @@ public class GravSwarm extends ApplicationAdapter {
 		{
 			this.transform.translate(velocity);
 		}
+		void scaleVelocity(float scalar){velocity.scl(scalar);}
 	}
 
-	class Gravity
+	class Gravity implements Pool.Poolable
 	{
 		Vector3 position;
 		float magnitude;
 		boolean quadratic;
+		PointLight light;
 
 		Gravity()
 		{
@@ -157,7 +278,7 @@ public class GravSwarm extends ApplicationAdapter {
 		}
 		Gravity(float magnitude)
 		{
-			this(new Vector3(0f,0f,0f),magnitude);
+			this(new Vector3(0f, 0f, 0f), magnitude);
 		}
 
 		Gravity(Vector3 position,float magnitude, boolean quadratic)
@@ -165,6 +286,9 @@ public class GravSwarm extends ApplicationAdapter {
 			this.position=new Vector3(position);
 			this.magnitude=magnitude;
 			this.quadratic=quadratic;
+			light=new PointLight();
+			light.set(1f, 1f, 1f, position, LIGHT_INTENSITIY);
+			//environment.add(light);
 		}
 
 		public void setQuadratic(boolean mode)
@@ -174,6 +298,22 @@ public class GravSwarm extends ApplicationAdapter {
 
 		public void setMagnitude(float magnitude) {
 			this.magnitude = magnitude;
+		}
+
+		public void setPosition(Vector3 position) {
+			this.position = position;
+			light.setPosition(position);
+		}
+
+		@Override public void reset()
+		{
+			environment.remove(light);
+		}
+
+		public void spawn(Vector3 position)
+		{
+			environment.add(light);
+			this.setPosition(position);
 		}
 
 		public Vector3 getAccel(Vector3 satPos)
@@ -195,51 +335,59 @@ public class GravSwarm extends ApplicationAdapter {
 
 	class GravityHandler extends Thread
 	{
-		Vector<Gravity> gravities;
-		Vector<Moon> moons;
 		int lowBound, highBound;
 
-		GravityHandler(Vector<Gravity> gravities,Vector<Moon> moons)
+		GravityHandler()
 		{
-			this(gravities, moons,-1,-1);
+			this(-1,-1);
 		}
 
-		GravityHandler(Vector<Gravity> gravities,Vector<Moon> moons,int lowBound,int highBound)
+		GravityHandler(int lowBound,int highBound)
 		{
-			this.gravities=gravities;
-			this.moons=moons;
 			this.lowBound=lowBound;
 			this.highBound=highBound;
 		}
 
+		public void setBounds(int high, int low)
+		{
+			lowBound=low;
+			highBound=high;
+		}
+
 		@Override public void run()
 		{
-			int y,x;
+			int gravityNumber,moonNumber;
 			Vector3 position=new Vector3();
 			while(!Thread.interrupted())
 			{
-				try {
-					wait();
-				} catch (InterruptedException e) {
-					e.printStackTrace();
-				}
 				if(highBound==-1)
 					highBound=moons.size();
 				if(lowBound==-1)
 					lowBound=0;
-				x=lowBound;
-				while(x<highBound)
+				moonNumber=lowBound;
+				while(moonNumber<highBound)
 				{
-					for(y=0;y<gravities.size();++y)
+					for(gravityNumber=0;gravityNumber<gravities.size();++gravityNumber)
 					{
-						moons.elementAt(x).transform.getTranslation(position);
-						moons.elementAt(x).updateVelocity(gravities.elementAt(y).getAccel(position));
+						moons.elementAt(moonNumber).transform.getTranslation(position);
+						moons.elementAt(moonNumber).updateVelocity(gravities.elementAt(gravityNumber).getAccel(position));
 					}
-					moons.elementAt(x).move();
-					++x;
+					++moonNumber;
 				}
-				notify();
-
+				try {
+					barrier.await();
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				} catch (BrokenBarrierException e) {
+					e.printStackTrace();
+				}
+				try {
+					barrier.await();
+				} catch (InterruptedException e) {
+					e.printStackTrace();
+				} catch (BrokenBarrierException e) {
+					e.printStackTrace();
+				}
 			}
 		}
 	}
